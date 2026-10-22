@@ -1,2 +1,4 @@
 # Lab8-MoreGit
-# THIS IS A DIFFERENT BRANCH
+# Emanuel Hernandez
+
+The Vector Calculator Lab Program
