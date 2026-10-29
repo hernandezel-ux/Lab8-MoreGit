@@ -1,14 +1,22 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -std=c11
-OBJS = main.o vector.o storage.o interface.o
+CC=gcc
+CFLAGS=-c -Wall -Wextra -pedantic -std=c11 -g
+LDFLAGS=
+SOURCES=main.c vector.c storage.c interface.c
+OBJECTS=$(SOURCES:.c=.o)
+EXECUTABLE=minimat
 
-minimat: $(OBJS)
-	$(CC) $(CFLAGS) -o minimat $(OBJS)
+all: $(EXECUTABLE)
 
-main.o: main.c interface.h
-vector.o: vector.c vector.h
-storage.o: storage.c storage.h vector.h
-interface.o: interface.c interface.h storage.h vector.h
+-include $(OBJECTS:.o=.d)
+
+$(EXECUTABLE): $(OBJECTS)
+	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
+
+.c.o:
+	$(CC) $(CFLAGS) $< -o $@
+	$(CC) -MM $< > $*.d
 
 clean:
-	rm -f $(OBJS) minimat
+	rm -rf $(OBJECTS) $(EXECUTABLE) *.d
+
+.PHONY: all clean

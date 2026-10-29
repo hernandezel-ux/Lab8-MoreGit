@@ -9,14 +9,14 @@
 #ifndef STORAGE_H
 #define STORAGE_H
 
+#include <stddef.h>
 #include "vector.h"
 
-#define MAX_VECTORS 10
 
 int findvect(const char *name, vect *found);
 int addvect(vect value);
 void clearVectors(void);
-int vectorCount(void);
-int getVectorAt(int index, vect *found);
+size_t vectorCount(void);
+int getVectorAt(size_t index, vect *found);
 
 #endif

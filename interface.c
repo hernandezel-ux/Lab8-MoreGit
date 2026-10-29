@@ -7,15 +7,19 @@
  * Processes vector assignments, calculations, help, list, clear, and quit commands. Displays results and error messages.
  *****************************************************/
 
+#include <ctype.h>
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+
 #include "interface.h"
 #include "storage.h"
 #include "vector.h"
 
-#define LINE_SIZE 256
+#define LINE_SIZE 512
+
 
 // Display a vector
 static void printVector(vect v) {
@@ -50,60 +54,85 @@ static int validName(const char *name) {
         return 0;
     }
 
-    for (int i = 1; name[i]; i++) {
-        if (!isalnum((unsigned char)name[i]) &&
-            name[i] != '_') {
+    for (const char *p = name + 1; *p; p++) {
+        if (!isalnum((unsigned char)*p) &&
+            *p != '_') {
             return 0;
         }
     }
 
-    return strcmp(name, "quit") != 0 &&
+    return strcmp(name, "help") != 0 &&
+           strcmp(name, "list") != 0 &&
            strcmp(name, "clear") != 0 &&
-           strcmp(name, "list") != 0;
+           strcmp(name, "quit") != 0 &&
+           strcmp(name, "load") != 0 &&
+           strcmp(name, "save") != 0;
 }
 
 // Convert text into a number
-static int parseNumber(const char *text, double *number) {
+static int parseNumber(const char *text, double *value) {
     char *end;
 
-    *number = strtod(text, &end);
+    errno = 0;
+    *value = strtod(text, &end);
 
-    return end != text && *end == '\0';
+    return end != text &&
+           *end == '\0' &&
+           errno != ERANGE;
 }
 
-// Perform vector calculations
-// Returns 1 for a vector result
-// Returns 2 for a scalar result (dot product)
-// Returns 0 if an error occurs
-static int evaluate(const char *expr,
+// Read three vector components
+static int parseComponents(char *text, vect *v) {
+    for (char *p = text; *p; p++) {
+        if (*p == ',') {
+            *p = ' ';
+        }
+    }
+
+    char trailing;
+
+    return sscanf(text, " %lf %lf %lf %c",
+                  &v->x, &v->y, &v->z, &trailing) == 3;
+}
+
+// Evaluate vector mathematical operations
+// Return 0 = error, 1 = vector, 2 = scalar
+static int evaluate(const char *expression,
                     vect *result,
-                    double *scalarResult) {
+                    double *scalar) {
 
-    char left[64], right[64], op[2], extra;
+    char left[64], op[2], right[64], extra;
 
-    if (sscanf(expr, "%63s %1s %63s %c",
+    if (sscanf(expression, " %63s %1s %63s %c",
                left, op, right, &extra) != 3) {
-        printf("Invalid operation.\n");
+        puts("Invalid expression. Use spaces around operators.");
         return 0;
     }
 
     vect a, b;
-    double n;
+    double number;
 
-    // Vector addition and subtraction
+    // Addition, subtraction, dot, and cross product
     if (strcmp(op, "+") == 0 ||
-        strcmp(op, "-") == 0) {
+        strcmp(op, "-") == 0 ||
+        strcmp(op, ".") == 0 ||
+        strcmp(op, "x") == 0) {
 
         if (!findvect(left, &a) ||
             !findvect(right, &b)) {
-            printf("Both vectors must exist.\n");
+            puts("Both vectors must exist.");
             return 0;
         }
 
-        if (op[0] == '+') {
+        if (*op == '+') {
             *result = add(a, b);
-        } else {
+        } else if (*op == '-') {
             *result = subtract(a, b);
+        } else if (*op == 'x') {
+            *result = crossProduct(a, b);
+        } else {
+            *scalar = dotProduct(a, b);
+            return 2;
         }
 
         return 1;
@@ -112,57 +141,33 @@ static int evaluate(const char *expr,
     // Scalar multiplication
     if (strcmp(op, "*") == 0) {
         if (findvect(left, &a) &&
-            parseNumber(right, &n)) {
-            *result = multiply(a, n);
+            parseNumber(right, &number)) {
+            *result = multiply(a, number);
             return 1;
         }
 
-        if (parseNumber(left, &n) &&
+        if (parseNumber(left, &number) &&
             findvect(right, &b)) {
-            *result = multiply(b, n);
+            *result = multiply(b, number);
             return 1;
         }
 
-        printf("Multiplication requires one vector and one number.\n");
+        puts("Scalar multiplication needs one vector and one number.");
         return 0;
-    }
-
-    // Dot product
-    if (strcmp(op, ".") == 0) {
-        if (!findvect(left, &a) ||
-            !findvect(right, &b)) {
-            printf("Both vectors must exist for dot product.\n");
-            return 0;
-        }
-
-        *scalarResult = dotProduct(a, b);
-        return 2;
-    }
-
-    // Cross product
-    if (strcmp(op, "x") == 0) {
-        if (!findvect(left, &a) ||
-            !findvect(right, &b)) {
-            printf("Both vectors must exist for cross product.\n");
-            return 0;
-        }
-
-        *result = crossProduct(a, b);
-        return 1;
     }
 
     printf("Unknown operator: %s\n", op);
     return 0;
 }
 
-// List all stored vectors
+// Display all stored vectors
 static void listVectors(void) {
     if (vectorCount() == 0) {
-        printf("No vectors stored.\n");
+        puts("No vectors stored.");
         return;
     }
 
-    for (int i = 0; i < vectorCount(); i++) {
+    for (size_t i = 0; i < vectorCount(); i++) {
         vect value;
 
         if (getVectorAt(i, &value)) {
@@ -171,19 +176,187 @@ static void listVectors(void) {
     }
 }
 
-// Process commands entered by user
-static void processCommand(char *line, int *running) {
+// Parse one CSV row: name,x,y,z
+static int parseCsvRow(char *line, vect *v) {
+    char *fields[4];
+    char *p = line;
 
-    // Replace commas with spaces
-    for (char *p = line; *p; p++) {
-        if (*p == ',') {
-            *p = ' ';
+    for (int i = 0; i < 4; i++) {
+        fields[i] = p;
+        char *comma = strchr(p, ',');
+
+        if (i < 3) {
+            if (!comma) {
+                return 0;
+            }
+
+            *comma = '\0';
+            p = comma + 1;
+        } else if (comma) {
+            return 0;
+        }
+
+        fields[i] = trim(fields[i]);
+    }
+
+    if (!validName(fields[0])) {
+        return 0;
+    }
+
+    if (!parseNumber(fields[1], &v->x) ||
+        !parseNumber(fields[2], &v->y) ||
+        !parseNumber(fields[3], &v->z)) {
+        return 0;
+    }
+
+    strcpy(v->name, fields[0]);
+    return 1;
+}
+
+// Load vectors from a CSV file
+static void loadVectors(const char *filename) {
+    FILE *fp = fopen(filename, "r");
+
+    if (!fp) {
+        perror("Cannot open file for loading");
+        return;
+    }
+
+    vect *incoming = NULL;
+    size_t length = 0;
+    size_t capacity = 0;
+    size_t lineNo = 0;
+    int good = 1;
+
+    char line[LINE_SIZE];
+
+    while (fgets(line, sizeof(line), fp)) {
+        lineNo++;
+
+        // Reject lines that exceed the buffer
+        if (!strchr(line, '\n') && !feof(fp)) {
+            fprintf(stderr, "CSV line %zu is too long.\n",
+                    lineNo);
+            good = 0;
+            break;
+        }
+
+        char *row = trim(line);
+
+        // Skip blank lines
+        if (*row == '\0') {
+            continue;
+        }
+
+        vect value = {0};
+
+        if (!parseCsvRow(row, &value)) {
+            fprintf(stderr,
+                    "Invalid CSV data on line %zu.\n",
+                    lineNo);
+            good = 0;
+            break;
+        }
+
+        // Expand temporary storage if necessary
+        if (length == capacity) {
+            size_t next = capacity == 0 ? 8 : capacity * 2;
+
+            if (next < capacity ||
+                next > SIZE_MAX / sizeof(*incoming)) {
+                good = 0;
+                break;
+            }
+
+            vect *grown = realloc(
+                incoming,
+                next * sizeof(*incoming)
+            );
+
+            if (!grown) {
+                good = 0;
+                break;
+            }
+
+            incoming = grown;
+            capacity = next;
+        }
+
+        incoming[length++] = value;
+    }
+
+    if (ferror(fp)) {
+        perror("Error reading CSV");
+        good = 0;
+    }
+
+    if (fclose(fp) != 0) {
+        perror("Error closing CSV");
+        good = 0;
+    }
+
+    // Merge loaded vectors with existing vectors
+    if (good) {
+        for (size_t i = 0; i < length; i++) {
+            if (!addvect(incoming[i])) {
+                fprintf(stderr,
+                        "Out of memory while loading CSV.\n");
+                good = 0;
+                break;
+            }
         }
     }
 
+    if (good) {
+        printf("Loaded %zu rows from %s (%zu stored vectors).\n",
+               length, filename, vectorCount());
+    } else {
+        puts("Load failed.");
+    }
+
+    free(incoming);
+}
+
+// Save all stored vectors to a CSV file
+static void saveVectors(const char *filename) {
+    FILE *fp = fopen(filename, "w");
+
+    if (!fp) {
+        perror("Cannot open file for saving");
+        return;
+    }
+
+    int good = 1;
+
+    for (size_t i = 0; i < vectorCount(); i++) {
+        vect v;
+
+        if (getVectorAt(i, &v) &&
+            fprintf(fp, "%s,%.17g,%.17g,%.17g\n",
+                    v.name, v.x, v.y, v.z) < 0) {
+            good = 0;
+            break;
+        }
+    }
+
+    if (fclose(fp) != 0) {
+        good = 0;
+    }
+
+    if (good) {
+        printf("Saved %zu vectors to %s.\n",
+               vectorCount(), filename);
+    } else {
+        fprintf(stderr, "Error writing CSV to %s.\n",
+                filename);
+    }
+}
+
+// Process user commands
+static void processCommand(char *line, int *running) {
     char *command = trim(line);
 
-    if (*command == '\0') {
+    if (!*command) {
         return;
     }
 
@@ -193,10 +366,16 @@ static void processCommand(char *line, int *running) {
         return;
     }
 
+    // Help command
+    if (strcmp(command, "help") == 0) {
+        showHelp();
+        return;
+    }
+
     // Clear command
     if (strcmp(command, "clear") == 0) {
         clearVectors();
-        printf("Vector memory cleared.\n");
+        puts("Memory cleared and freed.");
         return;
     }
 
@@ -206,42 +385,59 @@ static void processCommand(char *line, int *running) {
         return;
     }
 
+    // Load and save commands
+    if (strncmp(command, "load ", 5) == 0 ||
+        strncmp(command, "save ", 5) == 0) {
+
+        int loading = command[0] == 'l';
+        char *filename = trim(command + 5);
+
+        if (!*filename ||
+            strpbrk(filename, " \t\r\n")) {
+            puts("Filename is required and cannot contain spaces.");
+            return;
+        }
+
+        if (loading) {
+            loadVectors(filename);
+        } else {
+            saveVectors(filename);
+        }
+
+        return;
+    }
+
+    // Vector assignment
     char *equals = strchr(command, '=');
 
-    // Assignment
-    if (equals != NULL) {
+    if (equals) {
         *equals = '\0';
 
         char *name = trim(command);
         char *rhs = trim(equals + 1);
 
         if (!validName(name)) {
-            printf("Invalid vector name.\n");
+            puts("Invalid or reserved vector name.");
             return;
         }
 
         vect result = {0};
-        double scalarResult = 0;
-        double x, y, z;
-        char extra;
+        double scalar = 0;
+        char numeric[LINE_SIZE];
 
-        // Assign three numbers
-        if (sscanf(rhs, "%lf %lf %lf %c",
-                   &x, &y, &z, &extra) == 3) {
-            result.x = x;
-            result.y = y;
-            result.z = z;
-        } else {
-            int type = evaluate(rhs, &result, &scalarResult);
+        snprintf(numeric, sizeof(numeric), "%s", rhs);
+
+        if (!parseComponents(numeric, &result)) {
+            int type = evaluate(rhs, &result, &scalar);
 
             if (type == 0) {
                 return;
             }
 
-            // Dot product gives a number, not a vector
+            // Dot product produces a scalar
             if (type == 2) {
-                printf("Dot product = %.3f\n", scalarResult);
-                printf("Cannot store a scalar as a vector.\n");
+                printf("Dot product = %.3f; scalar cannot "
+                       "be stored as a vector.\n", scalar);
                 return;
             }
         }
@@ -249,7 +445,7 @@ static void processCommand(char *line, int *running) {
         strcpy(result.name, name);
 
         if (!addvect(result)) {
-            printf("Vector memory full (maximum 10 vectors).\n");
+            puts("Out of memory: cannot store vector.");
             return;
         }
 
@@ -257,54 +453,58 @@ static void processCommand(char *line, int *running) {
         return;
     }
 
-    // Display an existing vector
-    if (strchr(command, ' ') == NULL &&
-        strchr(command, '\t') == NULL) {
+    // Display one vector
+    if (!strchr(command, ' ') &&
+        !strchr(command, '\t')) {
 
         vect value;
 
-        if (!findvect(command, &value)) {
-            printf("Vector '%s' does not exist.\n", command);
-        } else {
+        if (findvect(command, &value)) {
             printVector(value);
+        } else {
+            printf("Vector '%s' does not exist.\n", command);
         }
 
         return;
     }
 
-    // Calculation without assignment
+    // Calculate without assigning
     vect result = {0};
-    double scalarResult = 0;
+    double scalar = 0;
 
-    int type = evaluate(command, &result, &scalarResult);
+    int type = evaluate(command, &result, &scalar);
+
+    if (type == 2) {
+        printf("ans = %.3f\n", scalar);
+    }
 
     if (type == 1) {
         strcpy(result.name, "ans");
         printVector(result);
-    } else if (type == 2) {
-        printf("ans = %.3f\n", scalarResult);
     }
 }
 
-// Help menu
+// Display the help menu
 void showHelp(void) {
-    printf("Usage: ./minimat [-h]\n");
-    printf("Commands:\n");
-    printf("  a = 1 2 3     Create a vector\n");
-    printf("  a = 1, 2, 3  Commas also work\n");
-    printf("  a             Display vector\n");
-    printf("  a + b         Add vectors\n");
-    printf("  a - b         Subtract vectors\n");
-    printf("  a * 2         Scalar multiplication\n");
-    printf("  2 * a         Scalar multiplication\n");
-    printf("  a . b         Dot product\n");
-    printf("  a x b         Cross product\n");
-    printf("  c = a + b     Store calculation result\n");
-    printf("  c = a x b     Store cross product\n");
-    printf("  list          Display all vectors\n");
-    printf("  clear         Clear vector memory\n");
-    printf("  quit          Exit calculator\n");
-    printf("Use spaces around operators.\n");
+    puts("MiniMAT Vector Calculator");
+    puts("  help             Show this help");
+    puts("  a = 1 2 3        Create or replace vector");
+    puts("  a = 1, 2, 3     Commas also work");
+    puts("  a                Display vector");
+    puts("  a + b            Vector addition");
+    puts("  a - b            Vector subtraction");
+    puts("  a * 2            Scalar multiplication");
+    puts("  2 * a            Scalar multiplication");
+    puts("  a . b            Dot product");
+    puts("  a x b            Cross product");
+    puts("  c = a x b        Save cross product");
+    puts("  list             List stored vectors");
+    puts("  clear            Free vector memory");
+    puts("  load <filename>  Load CSV vectors");
+    puts("  save <filename>  Save vectors to CSV");
+    puts("  quit             Exit calculator");
+    puts("Use spaces around arithmetic operators.");
+    puts("CSV format: name,x,y,z (no header).");
 }
 
 // Main calculator loop
@@ -318,6 +518,18 @@ void runCalculator(void) {
 
         if (!fgets(line, sizeof(line), stdin)) {
             break;
+        }
+
+        // Check for input exceeding buffer size
+        if (!strchr(line, '\n') && !feof(stdin)) {
+            int ch;
+
+            while ((ch = getchar()) != '\n' &&
+                   ch != EOF) {
+            }
+
+            puts("Input too long.");
+            continue;
         }
 
         processCommand(line, &running);
